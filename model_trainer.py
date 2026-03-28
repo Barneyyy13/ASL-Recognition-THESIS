@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -52,8 +53,9 @@ def main():
     best_loss = float('inf')  # Start with an infinitely high loss
     patience = 15  # How many epochs to wait before giving up
     patience_counter = 0  # Tracks how many epochs have failed to improve
-
+    loss_history = []
     epochs = 500
+
     for epoch in range(epochs):
         running_loss = 0.0
         for features, labels in train_loader:
@@ -70,19 +72,40 @@ def main():
         # --- EARLY STOPPING LOGIC ---
         # Calculate the average loss for this specific epoch
         current_loss = running_loss / len(train_loader)
+        loss_history.append(current_loss)
 
         if current_loss < best_loss:
             best_loss = current_loss
             patience_counter = 0  # Reset the strike counter because it improved
-            torch.save(model.state_dict(), 'sign_language_model(test).pth')
+            torch.save(model.state_dict(), 'sign_language_model.pth')
             print(f"  -> Model improved! Saved with loss: {best_loss:.4f}")
-            
+
         else:
             patience_counter += 1  # The model didn't improve, add a strike
 
             if patience_counter >= patience:
                 print(f"Early stopping triggered at Epoch {epoch + 1}! Training halted safely.")
                 break  # Instantly breaks out of the loop and stops training
+
+    # --- GENERATE TRAINING GRAPH ---
+    print("\nGenerating training performance graph...")
+
+    # 1. Create a blank 10x6 inch canvas
+    plt.figure(figsize=(10, 6))
+
+    # 2. Plot the list of scores we tracked
+    plt.plot(loss_history, label='Training Loss', color='blue', linewidth=2)
+
+    # 3. Add professional academic labels
+    plt.title('LSTM Model Training Performance (Loss Curve)')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss (Lower is Better)')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+
+    # 4. Save the image to your project folder
+    plt.savefig('training_curve.png', dpi=300, bbox_inches='tight')
+    print("Graph saved successfully as 'training_curve.png'!")
 
 
 if __name__ == "__main__":
