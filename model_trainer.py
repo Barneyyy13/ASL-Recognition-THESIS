@@ -48,7 +48,12 @@ def main():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    epochs = 200
+    # --- EARLY STOPPING SETUP ---
+    best_loss = float('inf')  # Start with an infinitely high loss
+    patience = 15  # How many epochs to wait before giving up
+    patience_counter = 0  # Tracks how many epochs have failed to improve
+
+    epochs = 500
     for epoch in range(epochs):
         running_loss = 0.0
         for features, labels in train_loader:
@@ -62,8 +67,22 @@ def main():
         if (epoch + 1) % 10 == 0:
             print(f"Epoch [{epoch + 1}/{epochs}], Loss: {running_loss / len(train_loader):.4f}")
 
-    torch.save(model.state_dict(), 'sign_language_model.pth')
-    print("Training complete! Model saved as 'sign_language_model.pth'")
+        # --- EARLY STOPPING LOGIC ---
+        # Calculate the average loss for this specific epoch
+        current_loss = running_loss / len(train_loader)
+
+        if current_loss < best_loss:
+            best_loss = current_loss
+            patience_counter = 0  # Reset the strike counter because it improved
+            torch.save(model.state_dict(), 'sign_language_model(test).pth')
+            print(f"  -> Model improved! Saved with loss: {best_loss:.4f}")
+            
+        else:
+            patience_counter += 1  # The model didn't improve, add a strike
+
+            if patience_counter >= patience:
+                print(f"Early stopping triggered at Epoch {epoch + 1}! Training halted safely.")
+                break  # Instantly breaks out of the loop and stops training
 
 
 if __name__ == "__main__":
