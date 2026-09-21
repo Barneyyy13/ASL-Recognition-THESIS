@@ -146,7 +146,7 @@ def main():
 
     # Initialize the model and load trained weights
     model = SignLanguageLSTM(num_classes=len(CLASSES))
-    model_path = 'sign_language_model_test(Sep13).pth'
+    model_path = 'sign_language_model_test_Validation(Sep21).pth'
 
     if os.path.exists(model_path):
         try:
@@ -230,8 +230,17 @@ def main():
             elif np.sum(np.abs(sequence[-1][:69])) == 0.0:  # Check if the most recent frame has body (69 features)
                 prediction_text = "Waiting for person..."
             else:
-                # Format the data for PyTorch (1 batch, 45 frames, 195 features)
-                input_tensor = torch.tensor(np.array(sequence), dtype=torch.float32).unsqueeze(0).to(device)
+                # 1. Convert the deque to a NumPy array first
+                numpy_sequence = np.array(sequence)
+
+                # --- THE FIX: ZERO OUT LOWER POSE (ELBOWS/WRISTS) ---
+                # This explicitly overwrites features 39 through 68 with 0.0
+                # across all 45 frames in the buffer instantly.
+                numpy_sequence[:, 39:69] = 0.0
+                # ----------------------------------------------------
+
+                # 2. Format the data for PyTorch (1 batch, 45 frames, 195 features)
+                input_tensor = torch.tensor(numpy_sequence, dtype=torch.float32).unsqueeze(0).to(device)
 
                 with torch.no_grad():
                     outputs = model(input_tensor)
