@@ -9,12 +9,13 @@ import threading
 import os
 import time
 import json
+import sys
 
 # --- Camera capture cap initialization---
 class WebcamStream:
     def __init__(self, src=0):
-        # For native camera
-        if isinstance(src, int):
+        # Cross-platform backend selection: Use CAP_DSHOW only on Windows
+        if isinstance(src, int) and sys.platform.startswith('win'):
             self.stream = cv2.VideoCapture(src, cv2.CAP_DSHOW)
         else:
             self.stream = cv2.VideoCapture(src)
@@ -37,17 +38,20 @@ class WebcamStream:
             time.sleep(0.1)
 
     def start(self):
-        threading.Thread(target=self.update, args=(), daemon=True).start()
+        self.thread = threading.Thread(target=self.update, args=(), daemon=True)
+        self.thread.start()
         return self
 
     def update(self):
         consecutive_failures = 0
-        max_failures = 30  # 30 consecutive failed frames result to stopping
+        max_failures = 30
         while not self.stopped:
             grabbed, frame = self.stream.read()
             if not grabbed:
                 consecutive_failures += 1
                 if consecutive_failures >= max_failures:
+                    with self.lock:
+                        self.grabbed = False  # Prevents infinite frozen-frame loop
                     self.stop()
                     break
                 time.sleep(0.01)
@@ -57,10 +61,13 @@ class WebcamStream:
             with self.lock:
                 self.grabbed = grabbed
                 self.frame = frame
+            time.sleep(0.01)
 
     def read(self):
         with self.lock:
-            return self.grabbed, self.frame
+            grabbed, frame = self.grabbed, self.frame
+        # Copy outside the lock so drawing landmarks doesn't mutate the shared buffer
+        return grabbed, (frame.copy() if frame is not None else None)
 
     def isOpened(self):
         with self.lock:
@@ -77,7 +84,11 @@ class WebcamStream:
 
     def release(self):
         self.stop()
-        self.stream.release()
+        t = getattr(self, "thread", None)
+        if t is not None and t.is_alive():
+            t.join(timeout=1.0)  # Wait for in-flight C++ read() to finish before releasing driver
+        if self.stream.isOpened():
+            self.stream.release()
 
 # ---  The Neural Network Model ---
 class SignLanguageLSTM(nn.Module):
@@ -128,36 +139,37 @@ def enforce_4_3_aspect_ratio(frame):
 
 
 def main():
+    # --- Initialize ---
+    CLASSES_PATH = 'classes(Oct22_lorirobin).json'
+    MODEL_PATH = 'sign_language_model_test(Oct22_lorirobin).pth'
+    SEQUENCE_LENGTH = 45
+
     # --- Load Class Mapping ---
     try:
-        with open('classes.json', 'r') as f:
+        with open(CLASSES_PATH, 'r') as f:
             CLASSES = json.load(f)
         print(f"Loaded classes: {CLASSES}")
     except FileNotFoundError:
         print("Error: classes.json not found. Please train the model first.")
         return
 
-    # ---  Configuration ---
-    SEQUENCE_LENGTH = 45
-
     # Device configuration
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # Initialize the model and load trained weights
+    # Load trained weights
     model = SignLanguageLSTM(num_classes=len(CLASSES))
-    model_path = 'sign_language_model_test_Validation(Sep21).pth'
 
-    if os.path.exists(model_path):
+    if os.path.exists(MODEL_PATH):
         try:
-            model.load_state_dict(torch.load(model_path, map_location=device))
-            print(f"Successfully loaded model weights from '{model_path}'")
+            model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+            print(f"Successfully loaded model weights from '{MODEL_PATH}'")
         except Exception as e:
             print(f"Error loading model weights: {e}")
             print("This usually happens if the number of classes in the saved weights does not match len(CLASSES).")
             print("Running with uninitialized weights for visualization/debugging.")
     else:
-        print(f"Warning: Model weight file '{model_path}' not found.")
+        print(f"Warning: Model weight file '{MODEL_PATH}' not found.")
         print("Running with uninitialized weights for visualization/debugging.")
 
     model.to(device)
@@ -186,11 +198,14 @@ def main():
 
         if not cap.isOpened():
             print("Error: No functional camera detected. Exiting.")
+            cap.release()
             return
 
 
     # --- The Real-Time Game Loop ---
     try:
+        stable_prediction_text = "Thinking..."
+
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret or frame is None or frame.size == 0:
@@ -225,10 +240,14 @@ def main():
             sequence.append(full_frame_data)
 
             # --- The Prediction Engine ---
+            # --- The Prediction Engine ---
             if len(sequence) < SEQUENCE_LENGTH:
+                stable_prediction_text = "Thinking..."
                 prediction_text = f"Warming up ({len(sequence)}/{SEQUENCE_LENGTH})..."
             elif np.sum(np.abs(sequence[-1][:69])) == 0.0:  # Check if the most recent frame has body (69 features)
+                stable_prediction_text = "Thinking..."
                 prediction_text = "Waiting for person..."
+
             else:
                 # 1. Convert the deque to a NumPy array first
                 numpy_sequence = np.array(sequence)
@@ -242,17 +261,27 @@ def main():
                 # 2. Format the data for PyTorch (1 batch, 45 frames, 195 features)
                 input_tensor = torch.tensor(numpy_sequence, dtype=torch.float32).unsqueeze(0).to(device)
 
+                # Initialize UI smoothing state
+
                 with torch.no_grad():
                     outputs = model(input_tensor)
                     probabilities = F.softmax(outputs, dim=1)
                     confidence, predicted_idx = torch.max(probabilities, 1)
                     confidence_pct = confidence.item() * 100
+                    current_guess = CLASSES[predicted_idx.item()]
 
+                    # --- THE FIX: Temporal Hysteresis Filter ---
+                    # Entry threshold: Must confidently break 75% to show the sign
                     if confidence_pct > 75.0:
-                        current_guess = CLASSES[predicted_idx.item()]
-                        prediction_text = f"{current_guess} - {confidence_pct:.1f}%"
-                    else:
-                        prediction_text = "Thinking..."
+                        stable_prediction_text = f"{current_guess} - {confidence_pct:.1f}%"
+
+                    # Exit threshold: Must drop below 60% to revert to Thinking
+                    elif confidence_pct < 60.0:
+                        stable_prediction_text = "Thinking..."
+
+                    # If the confidence is between 60.0 and 75.0, it simply
+                    # keeps the previous stable_prediction_text, eliminating flicker.
+                    prediction_text = stable_prediction_text
 
             # --- Render User Interface ---
             cv2.putText(display_frame, prediction_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3, cv2.LINE_AA)
